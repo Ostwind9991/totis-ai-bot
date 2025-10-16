@@ -160,7 +160,7 @@ async def forward_to_group(message: Message):
 
 
 # === Відповідь із групи ===
-@dp.message(F.chat.id == GROUP_CHAT_ID)
+@dp.message(F.chat.id == GROUP_CHAT_ID, F.reply_to_message, flags={"block": False})
 async def handle_group_reply(message: Message):
     if not message.reply_to_message or not message.reply_to_message.from_user:
         return
