@@ -64,17 +64,25 @@ import re
 
 @dp.message(F.chat.id == GROUP_CHAT_ID, F.reply_to_message)
 async def reply_from_group(message: Message):
-    # Витягуємо ID користувача з тексту оригінального повідомлення
-    replied_text = message.reply_to_message.text or message.reply_to_message.caption or ""
+    # Перевіряємо, що відповідь дана саме на повідомлення бота
+    if not message.reply_to_message.from_user or message.reply_to_message.from_user.id != (await bot.me()).id:
+        return  # ігноруємо реплаї не до бота
+
+    # Отримуємо текст або підпис оригінального повідомлення
+    replied_text = message.reply_to_message.caption or message.reply_to_message.text or ""
+
+    # Витягуємо ID користувача через regex
     match = re.search(r"ID:\s*(\d+)", replied_text)
     if not match:
         await bot.send_message(GROUP_CHAT_ID, "⚠️ Не вдалося визначити ID користувача у повідомленні.")
         return
 
     user_id = int(match.group(1))
+    reply_text = message.text or "(без тексту)"
 
     try:
-        await bot.send_message(user_id, f"💬 Відповідь від команди:\n\n{message.text}")
+        await bot.send_message(user_id, f"💬 Відповідь від команди:\n\n{reply_text}")
+        await bot.send_message(GROUP_CHAT_ID, f"✅ Відповідь доставлено користувачу {user_id}")
     except Exception as e:
         await bot.send_message(GROUP_CHAT_ID, f"⚠️ Не вдалося надіслати повідомлення користувачу {user_id}\n{e}")
 
