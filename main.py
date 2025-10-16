@@ -9,7 +9,7 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message
 from dotenv import load_dotenv
 
-# === Налаштування ===
+# === Завантаження змінних середовища ===
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -22,6 +22,7 @@ dp = Dispatcher()
 
 DB_PATH = "links.db"
 
+
 # === Ініціалізація бази даних ===
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -33,10 +34,12 @@ async def init_db():
         """)
         await db.commit()
 
+
 async def save_link(group_message_id: int, user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT OR REPLACE INTO message_links VALUES (?, ?)", (group_message_id, user_id))
         await db.commit()
+
 
 async def get_user_by_group_message(group_message_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -45,7 +48,7 @@ async def get_user_by_group_message(group_message_id: int):
             return row[0] if row else None
 
 
-# === Обробка команд ===
+# === Команда /start ===
 @dp.message(CommandStart())
 async def start_handler(message: Message):
     welcome_text = (
@@ -58,7 +61,7 @@ async def start_handler(message: Message):
     await message.answer(welcome_text, parse_mode="HTML")
 
 
-# === Обробка повідомлень користувачів ===
+# === Обробка повідомлень від користувачів ===
 @dp.message(F.content_type.in_({ContentType.TEXT, ContentType.PHOTO, ContentType.VIDEO, ContentType.VOICE}))
 async def forward_to_group(message: Message):
     user = message.from_user
@@ -83,17 +86,25 @@ async def forward_to_group(message: Message):
         logging.info(f"Збережено зв’язок group_msg={sent.message_id} → user_id={user.id}")
 
 
-# === Обробка відповідей із групи ===
-@dp.message(F.chat.id == GROUP_CHAT_ID, F.reply_to_message)
-async def reply_from_group(message: Message):
-    # Переконуємось, що відповідь дана саме на повідомлення бота
-    if not message.reply_to_message.from_user or message.reply_to_message.from_user.id != (await bot.me()).id:
+# === Обробка відповідей з групи ===
+@dp.message(F.chat.id == GROUP_CHAT_ID)
+async def handle_group_messages(message: Message):
+    """
+    Обробка лише повідомлень у групі.
+    Якщо це reply на повідомлення бота — надсилаємо користувачу.
+    """
+    # Якщо це не reply — ігноруємо
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        return
+
+    # Якщо reply не на повідомлення бота — ігноруємо
+    if message.reply_to_message.from_user.id != (await bot.me()).id:
         return
 
     replied_message_id = message.reply_to_message.message_id
     user_id = await get_user_by_group_message(replied_message_id)
 
-    # Якщо не знайшли через базу — fallback: шукаємо ID у тексті/підписі
+    # Якщо не знайдено в базі — пробуємо витягти ID із тексту
     if not user_id:
         replied_text = message.reply_to_message.caption or message.reply_to_message.text or ""
         match = re.search(r"ID:\s*(\d+)", replied_text)
@@ -101,11 +112,10 @@ async def reply_from_group(message: Message):
             user_id = int(match.group(1))
 
     if not user_id:
-        await bot.send_message(GROUP_CHAT_ID, "⚠️ Не вдалося визначити користувача для цього повідомлення.")
+        await bot.send_message(GROUP_CHAT_ID, "⚠️ Не вдалося знайти користувача для цього повідомлення.")
         return
 
     reply_text = message.text or "(без тексту)"
-
     try:
         await bot.send_message(user_id, f"💬 Відповідь від команди:\n\n{reply_text}")
         await bot.send_message(GROUP_CHAT_ID, f"✅ Відповідь доставлено користувачу {user_id}")
@@ -113,7 +123,7 @@ async def reply_from_group(message: Message):
         await bot.send_message(GROUP_CHAT_ID, f"⚠️ Не вдалося доставити повідомлення користувачу {user_id}\n{e}")
 
 
-# === Головна функція ===
+# === Основна функція ===
 async def main():
     await init_db()
     await dp.start_polling(bot)
