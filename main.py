@@ -65,46 +65,55 @@ async def start_handler(message: Message):
 @dp.message(F.content_type.in_({ContentType.TEXT, ContentType.PHOTO, ContentType.VIDEO, ContentType.VOICE}))
 async def forward_to_group(message: Message):
     user = message.from_user
-    user_info = f"👤 Від: {user.full_name or 'Невідомо'} (ID: {user.id})"
+    user_id = user.id
+    full_name = user.full_name or "Невідомо"
+
+    # Якщо є username, робимо його клікабельним
+    if user.username:
+        username_part = f"(<a href='https://t.me/{user.username}'>@{user.username}</a>)"
+    else:
+        username_part = ""
+
+    user_info = f"👤 Повідомлення від <b>{full_name}</b> {username_part} (ID: <code>{user_id}</code>):"
 
     sent = None
+
     if message.text:
-        caption = f"✉️ Нове повідомлення від користувача\n{user_info}\n\n{message.text}"
-        sent = await bot.send_message(GROUP_CHAT_ID, caption)
+        caption = f"{user_info}\n\n{message.text}"
+        sent = await bot.send_message(GROUP_CHAT_ID, caption, parse_mode="HTML", disable_web_page_preview=True)
     elif message.photo:
-        caption = f"🖼 Фото від користувача\n{user_info}"
-        sent = await bot.send_photo(GROUP_CHAT_ID, photo=message.photo[-1].file_id, caption=caption)
+        caption = f"{user_info}\n\n🖼 Фото"
+        sent = await bot.send_photo(GROUP_CHAT_ID, photo=message.photo[-1].file_id, caption=caption, parse_mode="HTML")
     elif message.video:
-        caption = f"🎥 Відео від користувача\n{user_info}"
-        sent = await bot.send_video(GROUP_CHAT_ID, video=message.video.file_id, caption=caption)
+        caption = f"{user_info}\n\n🎥 Відео"
+        sent = await bot.send_video(GROUP_CHAT_ID, video=message.video.file_id, caption=caption, parse_mode="HTML")
     elif message.voice:
-        caption = f"🎙 Голосове повідомлення від користувача\n{user_info}"
-        sent = await bot.send_voice(GROUP_CHAT_ID, voice=message.voice.file_id, caption=caption)
+        caption = f"{user_info}\n\n🎙 Голосове повідомлення"
+        sent = await bot.send_voice(GROUP_CHAT_ID, voice=message.voice.file_id, caption=caption, parse_mode="HTML")
 
     if sent:
-        await save_link(sent.message_id, user.id)
-        logging.info(f"Збережено зв’язок group_msg={sent.message_id} → user_id={user.id}")
+        await save_link(sent.message_id, user_id)
+        logging.info(f"Збережено зв’язок group_msg={sent.message_id} → user_id={user_id}")
 
 
 # === Обробка відповідей з групи ===
 @dp.message(F.chat.id == GROUP_CHAT_ID)
 async def handle_group_messages(message: Message):
     """
-    Обробка лише повідомлень у групі.
-    Якщо це reply на повідомлення бота — надсилаємо користувачу.
+    Обробляє лише повідомлення в групі.
+    Якщо це reply на повідомлення бота — відправляє відповідь користувачу.
     """
-    # Якщо це не reply — ігноруємо
     if not message.reply_to_message or not message.reply_to_message.from_user:
         return
 
-    # Якщо reply не на повідомлення бота — ігноруємо
+    # Ігноруємо, якщо це не відповідь на повідомлення бота
     if message.reply_to_message.from_user.id != (await bot.me()).id:
         return
 
     replied_message_id = message.reply_to_message.message_id
     user_id = await get_user_by_group_message(replied_message_id)
 
-    # Якщо не знайдено в базі — пробуємо витягти ID із тексту
+    # Якщо не знайдено у базі, пробуємо regex
     if not user_id:
         replied_text = message.reply_to_message.caption or message.reply_to_message.text or ""
         match = re.search(r"ID:\s*(\d+)", replied_text)
@@ -120,7 +129,7 @@ async def handle_group_messages(message: Message):
         await bot.send_message(user_id, f"💬 Відповідь від команди:\n\n{reply_text}")
         await bot.send_message(GROUP_CHAT_ID, f"✅ Відповідь доставлено користувачу {user_id}")
     except Exception as e:
-        await bot.send_message(GROUP_CHAT_ID, f"⚠️ Не вдалося доставити повідомлення користувачу {user_id}\n{e}")
+        await bot.send_message(GROUP_CHAT_ID, f"⚠️ Не вдалося надіслати користувачу {user_id}\n{e}")
 
 
 # === Основна функція ===
