@@ -67,11 +67,16 @@ async def reply_from_group(message: Message):
     if replied_id in message_links:
         user_id = message_links[replied_id]
         try:
-            await bot.send_message(user_id, f"💬 Відповідь від команди:\n\n{message.text}")
+            # Якщо відповідь з групи — шлемо користувачу
+            if message.chat.id == GROUP_CHAT_ID:
+                await bot.send_message(user_id, f"💬 Відповідь від команди:\n\n{message.text}")
+            else:
+                logging.info("Ігноруємо, бо це не з групи")
         except Exception as e:
             await bot.send_message(GROUP_CHAT_ID, f"⚠️ Не вдалося надіслати повідомлення користувачу {user_id}\n{e}")
     else:
         await bot.send_message(GROUP_CHAT_ID, "⚠️ Не вдалося знайти користувача для цього повідомлення.")
+
 
 
 async def main():
