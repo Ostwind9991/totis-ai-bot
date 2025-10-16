@@ -60,22 +60,24 @@ async def forward_to_group(message: Message):
 
 
 # Обробка відповіді з групи
+import re
+
 @dp.message(F.chat.id == GROUP_CHAT_ID, F.reply_to_message)
 async def reply_from_group(message: Message):
-    replied_id = message.reply_to_message.message_id
+    # Витягуємо ID користувача з тексту оригінального повідомлення
+    replied_text = message.reply_to_message.text or message.reply_to_message.caption or ""
+    match = re.search(r"ID:\s*(\d+)", replied_text)
+    if not match:
+        await bot.send_message(GROUP_CHAT_ID, "⚠️ Не вдалося визначити ID користувача у повідомленні.")
+        return
 
-    if replied_id in message_links:
-        user_id = message_links[replied_id]
-        try:
-            # Якщо відповідь з групи — шлемо користувачу
-            if message.chat.id == GROUP_CHAT_ID:
-                await bot.send_message(user_id, f"💬 Відповідь від команди:\n\n{message.text}")
-            else:
-                logging.info("Ігноруємо, бо це не з групи")
-        except Exception as e:
-            await bot.send_message(GROUP_CHAT_ID, f"⚠️ Не вдалося надіслати повідомлення користувачу {user_id}\n{e}")
-    else:
-        await bot.send_message(GROUP_CHAT_ID, "⚠️ Не вдалося знайти користувача для цього повідомлення.")
+    user_id = int(match.group(1))
+
+    try:
+        await bot.send_message(user_id, f"💬 Відповідь від команди:\n\n{message.text}")
+    except Exception as e:
+        await bot.send_message(GROUP_CHAT_ID, f"⚠️ Не вдалося надіслати повідомлення користувачу {user_id}\n{e}")
+
 
 
 
