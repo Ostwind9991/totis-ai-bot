@@ -1,242 +1,162 @@
 import logging
-import re
-import os
 import asyncio
-import aiosqlite
+import json
+import os
+import sqlite3
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import Message, FSInputFile
+from aiogram.filters import Command
 from datetime import datetime
-from aiogram import Bot, Dispatcher, F
-from aiogram.enums import ContentType, ChatType
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from google.oauth2 import service_account
 import gspread
+from google.oauth2.service_account import Credentials
 
-# === БАЗОВІ НАЛАШТУВАННЯ ===
+# === ЛОГИ ===
+logging.basicConfig(level=logging.INFO)
+
+# === КОНСТАНТИ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "-1000000000000"))  # <-- з Railway
-DB_PATH = "feedback_messages.db"
+GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID"))
+GOOGLE_KEY_JSON = os.getenv("GOOGLE_KEY_JSON")
 
+# === ІНІЦІАЛІЗАЦІЯ ===
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-
-# === GOOGLE SHEETS ІНТЕГРАЦІЯ ===
-SERVICE_ACCOUNT_FILE = "service_account.json"
-SPREADSHEET_ID = "YOUR_SPREADSHEET_ID"
-SHEET_NAME = "Feedback"
-
-credentials = service_account.Credentials.from_service_account_file(
-    SERVICE_ACCOUNT_FILE,
-    scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-)
-gc = gspread.authorize(credentials)
-
-async def run_export():
+# === GOOGLE SHEETS ===
+def init_gsheets():
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("SELECT * FROM feedback_messages ORDER BY id DESC")
-            rows = await cursor.fetchall()
-
-        sh = gc.open_by_key(SPREADSHEET_ID)
-        worksheet = sh.worksheet(SHEET_NAME)
-        worksheet.clear()
-        headers = ["ID", "User ID", "Name", "Username", "Phone", "Type", "Text", "File ID", "Timestamp", "Status"]
-        worksheet.append_row(headers)
-
-        for r in rows:
-            worksheet.append_row([str(x) if x is not None else "" for x in r])
-
-        logging.info(f"✅ Експортовано {len(rows)} рядків у Google Sheets")
+        creds = Credentials.from_service_account_info(json.loads(GOOGLE_KEY_JSON))
+        gc = gspread.authorize(creds)
+        sh = gc.open("TOTIS_AI_BOT_LOGS").sheet1
+        return sh
     except Exception as e:
-        logging.error(f"❌ Помилка експорту у Google Sheets: {e}")
+        logging.error(f"Помилка підключення до Google Sheets: {e}")
+        return None
 
-# === ІНІЦІАЛІЗАЦІЯ БАЗИ ДАНИХ ===
-async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
+sheet = init_gsheets()
+
+# === SQLITE ===
+def init_db():
+    conn = sqlite3.connect("messages.db")
+    cur = conn.cursor()
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS feedback_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
             user_name TEXT,
             username TEXT,
-            phone TEXT,
             message_type TEXT,
             message_text TEXT,
             media_file_id TEXT,
+            group_message_id INTEGER,
             timestamp TEXT,
+            phone TEXT,
+            reply_text TEXT,
+            replied_by TEXT,
+            reply_timestamp TEXT,
             status TEXT
         )
-        """)
-        await db.commit()
+    """)
+    conn.commit()
+    conn.close()
 
-# === ДОПОМІЖНА ФУНКЦІЯ ===
-def user_block(user):
-    return f"<b>{user.full_name}</b> (@{user.username or '—'}) [<code>{user.id}</code>]"
+init_db()
 
-# === СТАРТ ===
-@dp.message(F.text == "/start")
-async def cmd_start(message: Message):
-    await message.answer(
-        "👋 Вітаю! Ви можете надіслати будь-яке повідомлення — текст, фото чи відео.\n"
-        "Якщо потрібно, просто напишіть свій номер телефону для зв’язку."
-    )
+async def save_message(message: Message, msg_type="text", media_file_id=None):
+    user = message.from_user
+    conn = sqlite3.connect("messages.db")
+    cur = conn.cursor()
 
-# === ПАНЕЛЬ АДМІНІСТРАТОРА ===
-@dp.message(F.text == "/panel")
-async def admin_panel(message: Message):
-    if message.chat.type != ChatType.SUPERGROUP:
-        return
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📞 Розсилка номерів", callback_data="broadcast_numbers")],
-        [InlineKeyboardButton(text="📝 Масова розсилка тексту", callback_data="broadcast_text")],
-        [InlineKeyboardButton(text="🎯 Надіслати одному", callback_data="send_one")]
-    ])
-    await message.answer("🛠 Панель адміністратора", reply_markup=keyboard)
+    cur.execute("""
+        INSERT INTO feedback_messages (user_id, user_name, username, message_type, message_text, media_file_id, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        user.id,
+        user.full_name,
+        user.username,
+        msg_type,
+        message.text or "",
+        media_file_id,
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ))
+    conn.commit()
+    conn.close()
 
-# === СТАТИСТИКА ===
-@dp.message(F.text == "/stats")
-async def show_stats(message: Message):
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("SELECT COUNT(*) FROM feedback_messages")
-        total = (await cursor.fetchone())[0]
-        cursor = await db.execute("SELECT COUNT(*) FROM feedback_messages WHERE DATE(timestamp)=DATE('now')")
-        today = (await cursor.fetchone())[0]
-    await message.answer(f"📊 Усього повідомлень: {total}\n📅 За сьогодні: {today}")
-
-# === РУЧНИЙ ЕКСПОРТ ===
-@dp.message(F.text == "/export")
-async def manual_export(message: Message):
-    await message.answer("⏳ Виконується експорт у Google Sheets...")
-    await run_export()
-    await message.answer("✅ Дані оновлено у таблиці.")
-
-# === ХЕНДЛЕР ДЛЯ РОЗСИЛОК ===
-@dp.callback_query(F.data == "broadcast_numbers")
-async def broadcast_numbers(callback: CallbackQuery):
-    await callback.message.answer("📣 Розсилка: запит номерів...")
-    async with aiosqlite.connect(DB_PATH) as db:
-        users = await db.execute("SELECT DISTINCT user_id FROM feedback_messages")
-        for (uid,) in await users.fetchall():
-            try:
-                await bot.send_message(uid, "📞 Будь ласка, напишіть номер телефону, на який ви зареєстровані у застосунку TOTIS Pharma.")
-            except Exception as e:
-                logging.warning(f"❌ Не вдалося надіслати користувачу {uid}: {e}")
-    await callback.message.answer("✅ Повідомлення відправлено всім користувачам.")
-
-@dp.callback_query(F.data == "broadcast_text")
-async def broadcast_text(callback: CallbackQuery):
-    await callback.message.answer("📝 Надішліть наступним повідомленням текст для масової розсилки.")
-    dp["awaiting_broadcast_text"] = True
-
-@dp.message(F.text, F.chat.type == ChatType.SUPERGROUP)
-async def handle_broadcast_text(message: Message):
-    if dp.get("awaiting_broadcast_text"):
-        text = message.text
-        async with aiosqlite.connect(DB_PATH) as db:
-            users = await db.execute("SELECT DISTINCT user_id FROM feedback_messages")
-            for (uid,) in await users.fetchall():
-                try:
-                    await bot.send_message(uid, text)
-                except Exception as e:
-                    logging.warning(f"❌ Помилка надсилання користувачу {uid}: {e}")
-        dp["awaiting_broadcast_text"] = False
-        await message.answer("✅ Масова розсилка виконана.")
-
-# === ВІДПОВІДЬ НА ПОВІДОМЛЕННЯ У ГРУПІ ===
-@dp.message(F.reply_to_message)
-async def reply_to_user(message: Message):
-    if message.chat.id != GROUP_CHAT_ID:
-        return
-    match = re.search(r"\[(\d+)\]", message.reply_to_message.text or "")
-    if match:
-        target_user_id = int(match.group(1))
+    # === ЕКСПОРТ В GOOGLE SHEETS ===
+    if sheet:
         try:
-            if message.text:
-                await bot.send_message(target_user_id, f"💬 Від адміністратора:\n{message.text}")
-            elif message.photo:
-                await bot.send_photo(target_user_id, message.photo[-1].file_id, caption=message.caption or "")
-            elif message.document:
-                await bot.send_document(target_user_id, message.document.file_id, caption=message.caption or "")
-            await message.reply("✅ Повідомлення надіслано користувачу.")
+            sheet.append_row([
+                user.id, user.full_name, user.username,
+                msg_type, message.text or "", media_file_id or "",
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            ])
         except Exception as e:
-            await message.reply(f"❌ Помилка: {e}")
+            logging.warning(f"Помилка автологування в Google Sheets: {e}")
 
-# === ЛОГІКА ЛОГУВАННЯ ПОВІДОМЛЕНЬ ===
-@dp.message(F.chat.type == "private")
-async def save_feedback(message: Message):
-    user = message.from_user
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    mtype = message.content_type
-    mtext = message.text or message.caption or ""
-    media_id = None
-
-    if mtype in ["photo", "document", "video", "voice", "audio"]:
-        if mtype == "photo":
-            media_id = message.photo[-1].file_id
-        elif mtype == "document":
-            media_id = message.document.file_id
-        elif mtype == "video":
-            media_id = message.video.file_id
-        elif mtype == "voice":
-            media_id = message.voice.file_id
-        elif mtype == "audio":
-            media_id = message.audio.file_id
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-        INSERT INTO feedback_messages (user_id, user_name, username, message_type, message_text, media_file_id, timestamp, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'new')
-        """, (user.id, user.full_name, user.username, mtype, mtext, media_id, timestamp))
-        await db.commit()
-
-    # Пересилка у групу
-    text = f"🧾 <b>Нове повідомлення</b>\n{user_block(user)}\nТип: {mtype}\nТекст: {mtext or '—'}"
-    try:
-        if mtype == "photo":
-            await bot.send_photo(GROUP_CHAT_ID, message.photo[-1].file_id, caption=text, parse_mode="HTML")
-        elif mtype == "document":
-            await bot.send_document(GROUP_CHAT_ID, message.document.file_id, caption=text, parse_mode="HTML")
-        elif mtype == "video":
-            await bot.send_video(GROUP_CHAT_ID, message.video.file_id, caption=text, parse_mode="HTML")
-        else:
-            await bot.send_message(GROUP_CHAT_ID, text, parse_mode="HTML")
-    except Exception as e:
-        logging.error(f"❌ Не вдалося переслати повідомлення в групу: {e}")
-
-    # Автоматичний експорт
-    try:
-        await run_export()
-    except Exception as e:
-        logging.warning(f"Помилка автологування у Google Sheets: {e}")
-
-# === ХЕНДЛЕР ДЛЯ НОМЕРІВ (текстом) ===
-@dp.message(F.chat.type == "private", F.text.regexp(r"^\+?\d{7,15}$"))
-async def save_phone_textually(message: Message):
-    user = message.from_user
-    phone = message.text.strip()
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            INSERT INTO feedback_messages (user_id, user_name, username, phone, message_type, message_text, timestamp, status)
-            VALUES (?, ?, ?, ?, 'text_phone', ?, ?, 'phone_received')
-            ON CONFLICT(user_id) DO UPDATE SET phone=excluded.phone, timestamp=excluded.timestamp
-        """, (user.id, user.full_name, user.username, phone, message.text, timestamp))
-        await db.commit()
-
-    msg = f"📞 <b>Користувач надіслав номер телефону</b>\n{user_block(user)}\nНомер: <code>{phone}</code>"
+    # === ДУБЛЮЄМО В ГРУПУ ===
+    msg = f"<b>Нове повідомлення</b>\n👤 <b>{user.full_name}</b> (@{user.username})\n🆔 <code>{user.id}</code>\n\n{message.text or ''}"
     await bot.send_message(GROUP_CHAT_ID, msg, parse_mode="HTML")
 
-    await message.answer("✅ Дякуємо! Ваш номер збережено для зв’язку.", parse_mode="HTML")
+# === ОБРОБНИКИ ===
 
-    try:
-        await run_export()
-    except Exception as e:
-        logging.warning(f"Помилка автологування у Google Sheets: {e}")
+@dp.message(Command("start"))
+async def cmd_start(message: Message):
+    await message.answer("👋 Вітаю! Напишіть своє запитання або залиште номер телефону для зв'язку.")
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: Message):
+    conn = sqlite3.connect("messages.db")
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM feedback_messages")
+    count = cur.fetchone()[0]
+    conn.close()
+    await message.answer(f"📊 Всього отримано повідомлень: <b>{count}</b>", parse_mode="HTML")
+
+@dp.message(Command("broadcast"))
+async def cmd_broadcast(message: Message):
+    if str(message.from_user.id) != os.getenv("ADMIN_ID"):
+        await message.answer("⛔ Немає доступу.")
+        return
+
+    await message.answer("Введіть текст для масової розсилки:")
+    dp.message.register(handle_broadcast_text)
+
+async def handle_broadcast_text(message: Message):
+    text = message.text
+    conn = sqlite3.connect("messages.db")
+    cur = conn.cursor()
+    cur.execute("SELECT DISTINCT user_id FROM feedback_messages")
+    users = cur.fetchall()
+    conn.close()
+
+    success, fail = 0, 0
+    for (uid,) in users:
+        try:
+            await bot.send_message(uid, text)
+            success += 1
+        except Exception:
+            fail += 1
+            continue
+
+    await message.answer(f"✅ Успішно: {success}\n❌ Помилки: {fail}")
+    dp.message.unregister(handle_broadcast_text)
+
+# === Всі типи повідомлень ===
+
+@dp.message()
+async def handle_all(message: Message):
+    if message.text and message.text.isdigit() and len(message.text) >= 9:
+        await save_message(message, msg_type="text_phone")
+    elif message.photo:
+        await save_message(message, msg_type="photo", media_file_id=message.photo[-1].file_id)
+    elif message.document:
+        await save_message(message, msg_type="file", media_file_id=message.document.file_id)
+    else:
+        await save_message(message)
 
 # === ЗАПУСК ===
 async def main():
-    await init_db()
+    logging.info("🚀 Бот запущено.")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
