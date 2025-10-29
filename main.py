@@ -127,13 +127,29 @@ async def forward_to_group(message: Message):
             sent = await bot.send_message(GROUP_CHAT_ID, caption, parse_mode="HTML", disable_web_page_preview=True)
             await save_feedback(user, "text", message.text, None, sent.message_id)
         elif message.photo:
+            user_caption = message.caption or ""
             caption = f"{user_info}\n\n🖼 Фото"
-            sent = await bot.send_photo(GROUP_CHAT_ID, message.photo[-1].file_id, caption=caption, parse_mode="HTML")
-            await save_feedback(user, "photo", None, message.photo[-1].file_id, sent.message_id)
+            if user_caption:
+                caption += f"\n\n{user_caption}"
+            sent = await bot.send_photo(
+                GROUP_CHAT_ID,
+                message.photo[-1].file_id,
+                caption=caption,
+                parse_mode="HTML"
+            )
+            await save_feedback(user, "photo", user_caption, message.photo[-1].file_id, sent.message_id)
         elif message.video:
+            user_caption = message.caption or ""
             caption = f"{user_info}\n\n🎥 Відео"
-            sent = await bot.send_video(GROUP_CHAT_ID, message.video.file_id, caption=caption, parse_mode="HTML")
-            await save_feedback(user, "video", None, message.video.file_id, sent.message_id)
+            if user_caption:
+                caption += f"\n\n{user_caption}"
+            sent = await bot.send_video(
+                GROUP_CHAT_ID,
+                message.video.file_id,
+                caption=caption,
+                parse_mode="HTML"
+            )
+            await save_feedback(user, "video", user_caption, message.video.file_id, sent.message_id)
         elif message.voice:
             caption = f"{user_info}\n\n🎙 Голосове повідомлення"
             sent = await bot.send_voice(GROUP_CHAT_ID, message.voice.file_id, caption=caption, parse_mode="HTML")
