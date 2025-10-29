@@ -1,259 +1,231 @@
 import asyncio
 import logging
 import os
-import re
-from datetime import datetime, date
+import json
 import aiosqlite
-from aiogram import Bot, Dispatcher, F, types
+from datetime import datetime
+from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ContentType
 from aiogram.filters import CommandStart, Command
-from aiogram.types import (
-    Message, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-)
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from google.oauth2.service_account import Credentials
+import gspread
 from dotenv import load_dotenv
 
-# === Ініціалізація ===
+# ==========================
+# 🔹 INIT
+# ==========================
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID"))
 PDF_URL = os.getenv("PDF_URL")
+DB_PATH = "links.db"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-DB_PATH = "links.db"
-
-# === Ініціалізація бази ===
+# ==========================
+# 🔹 CREATE DB
+# ==========================
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS feedback_messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                user_name TEXT,
-                username TEXT,
-                phone TEXT,
-                message_type TEXT,
-                message_text TEXT,
-                media_file_id TEXT,
-                group_message_id INTEGER,
-                timestamp TEXT,
-                reply_text TEXT,
-                replied_by TEXT,
-                reply_timestamp TEXT,
-                status TEXT
-            )
+        CREATE TABLE IF NOT EXISTS feedback_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            user_name TEXT,
+            username TEXT,
+            phone TEXT,
+            message_type TEXT,
+            message_text TEXT,
+            media_file_id TEXT,
+            group_message_id INTEGER,
+            timestamp TEXT,
+            reply_text TEXT,
+            replied_by TEXT,
+            reply_timestamp TEXT,
+            status TEXT
+        )
         """)
         await db.commit()
 
-# === Запис у базу ===
-async def save_feedback(user, message_type, message_text, media_file_id, group_message_id):
-    try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                INSERT INTO feedback_messages (
-                    user_id, user_name, username, phone,
-                    message_type, message_text, media_file_id,
-                    group_message_id, timestamp, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                user.id,
-                user.full_name,
-                user.username,
-                None,
-                message_type,
-                message_text,
-                media_file_id,
-                group_message_id,
-                datetime.now().isoformat(timespec="seconds"),
-                "new"
-            ))
-            await db.commit()
-    except Exception as e:
-        logging.error(f"DB error while saving feedback: {e}")
-
-async def update_phone(user_id, phone):
+# ==========================
+# 🔹 SAVE MESSAGE
+# ==========================
+async def save_feedback(user, message_type, text=None, media_id=None, group_message_id=None, status="received"):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE feedback_messages SET phone=? WHERE user_id=?", (phone, user_id))
+        await db.execute("""
+        INSERT INTO feedback_messages (
+            user_id, user_name, username, message_type, message_text,
+            media_file_id, group_message_id, timestamp, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user.id,
+            user.full_name,
+            user.username,
+            message_type,
+            text,
+            media_id,
+            group_message_id,
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            status
+        ))
         await db.commit()
 
-async def get_all_user_ids():
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT DISTINCT user_id FROM feedback_messages") as cur:
-            users = await cur.fetchall()
-            return [u[0] for u in users if u[0] is not None]
-
-# === /start ===
+# ==========================
+# 🔹 START
+# ==========================
 @dp.message(CommandStart())
 async def start_handler(message: Message):
-    kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(KeyboardButton("📞 Поділитися номером", request_contact=True))
     welcome_text = (
         "👋 Вітаємо в проєкті <b>«Тестування штучного інтелекту в застосунку TOTIS»</b>!\n\n"
-        "🧾 Ознайомтесь з інструкцією за посиланням:\n"
-        f"{PDF_URL}\n\n"
-        "Після цього можете поділитися своїм номером телефону, щоб ми могли зв’язатися при необхідності, "
-        "або просто надішліть своє повідомлення 💬"
+        f"🧾 Ознайомтесь з інструкцією:\n{PDF_URL}\n\n"
+        "Після цього можете надіслати своє повідомлення, фото або відео — "
+        "воно автоматично потрапить до команди розробників."
     )
-    await message.answer(welcome_text, parse_mode="HTML", reply_markup=kb)
+    await message.answer(welcome_text, parse_mode="HTML")
 
-# === Обробка контактів ===
-@dp.message(F.contact)
-async def handle_contact(message: Message):
-    contact = message.contact
-    phone = contact.phone_number
-    user_id = contact.user_id or message.from_user.id
-
-    await update_phone(user_id, phone)
-    await message.answer(f"✅ Дякуємо! Ваш номер {phone} збережено.", reply_markup=types.ReplyKeyboardRemove())
-    await bot.send_message(GROUP_CHAT_ID, f"📞 Користувач {message.from_user.full_name} поділився номером: {phone}")
-
-# === Повідомлення від користувачів ===
-@dp.message(F.chat.type == "private", F.content_type.in_({
-    ContentType.TEXT, ContentType.PHOTO, ContentType.VIDEO, ContentType.VOICE
-}))
+# ==========================
+# 🔹 USER → GROUP
+# ==========================
+@dp.message(F.content_type.in_({ContentType.TEXT, ContentType.PHOTO, ContentType.VIDEO, ContentType.VOICE}))
 async def forward_to_group(message: Message):
     user = message.from_user
-    username = f"(<a href='https://t.me/{user.username}'>@{user.username}</a>)" if user.username else ""
-    user_info = f"👤 <b>{user.full_name}</b> {username}\nID: <code>{user.id}</code>"
+    user_link = f"<a href='tg://user?id={user.id}'>{user.full_name}</a>"
+    user_info = f"👤 {user_link} (@{user.username})\n🆔 ID: <code>{user.id}</code>"
 
     sent = None
-    try:
-        if message.text:
-            caption = f"{user_info}\n\n{message.text}"
-            sent = await bot.send_message(GROUP_CHAT_ID, caption, parse_mode="HTML", disable_web_page_preview=True)
-            await save_feedback(user, "text", message.text, None, sent.message_id)
-        elif message.photo:
-            user_caption = message.caption or ""
-            caption = f"{user_info}\n\n🖼 Фото"
-            if user_caption:
-                caption += f"\n\n{user_caption}"
-            sent = await bot.send_photo(
-                GROUP_CHAT_ID,
-                message.photo[-1].file_id,
-                caption=caption,
-                parse_mode="HTML"
-            )
-            await save_feedback(user, "photo", user_caption, message.photo[-1].file_id, sent.message_id)
-        elif message.video:
-            user_caption = message.caption or ""
-            caption = f"{user_info}\n\n🎥 Відео"
-            if user_caption:
-                caption += f"\n\n{user_caption}"
-            sent = await bot.send_video(
-                GROUP_CHAT_ID,
-                message.video.file_id,
-                caption=caption,
-                parse_mode="HTML"
-            )
-            await save_feedback(user, "video", user_caption, message.video.file_id, sent.message_id)
-        elif message.voice:
-            caption = f"{user_info}\n\n🎙 Голосове повідомлення"
-            sent = await bot.send_voice(GROUP_CHAT_ID, message.voice.file_id, caption=caption, parse_mode="HTML")
-            await save_feedback(user, "voice", None, message.voice.file_id, sent.message_id)
-    except Exception as e:
-        logging.error(f"Error forwarding user message: {e}")
+    text_to_save = None
+    media_id = None
 
-# === Відповідь із групи ===
-@dp.message(F.chat.id == GROUP_CHAT_ID, F.reply_to_message, flags={"block": False})
+    if message.text:
+        text_to_save = message.text
+        caption = f"✉️ Нове повідомлення\n{user_info}\n\n{message.text}"
+        sent = await bot.send_message(GROUP_CHAT_ID, caption, parse_mode="HTML")
+
+    elif message.photo:
+        text_to_save = message.caption or ""
+        caption = f"🖼 Фото від користувача\n{user_info}"
+        if text_to_save:
+            caption += f"\n\n{text_to_save}"
+        media_id = message.photo[-1].file_id
+        sent = await bot.send_photo(GROUP_CHAT_ID, media_id, caption=caption, parse_mode="HTML")
+
+    elif message.video:
+        text_to_save = message.caption or ""
+        caption = f"🎥 Відео від користувача\n{user_info}"
+        if text_to_save:
+            caption += f"\n\n{text_to_save}"
+        media_id = message.video.file_id
+        sent = await bot.send_video(GROUP_CHAT_ID, media_id, caption=caption, parse_mode="HTML")
+
+    elif message.voice:
+        caption = f"🎙 Голосове повідомлення\n{user_info}"
+        media_id = message.voice.file_id
+        sent = await bot.send_voice(GROUP_CHAT_ID, media_id, caption=caption, parse_mode="HTML")
+
+    if sent:
+        await save_feedback(user, message.content_type, text_to_save, media_id, sent.message_id)
+
+# ==========================
+# 🔹 GROUP → USER (reply)
+# ==========================
+@dp.message(F.chat.id == GROUP_CHAT_ID, F.reply_to_message)
 async def reply_from_group(message: Message):
+    import re
     replied_text = message.reply_to_message.caption or message.reply_to_message.text or ""
     match = re.search(r"ID:\s*(\d+)", replied_text)
     if not match:
-        return await bot.send_message(GROUP_CHAT_ID, "⚠️ Не знайдено ID користувача.")
+        await bot.send_message(GROUP_CHAT_ID, "⚠️ Не вдалося знайти ID користувача.")
+        return
+
     user_id = int(match.group(1))
-
     reply_text = message.text or "(без тексту)"
-    formatted_reply = f"💬 Відповідь від support.totis:\n\n{reply_text}"
 
     try:
-        await bot.send_message(user_id, formatted_reply, parse_mode="HTML")
-        await bot.send_message(GROUP_CHAT_ID, f"✅ Відповідь доставлено користувачу {user_id}")
+        await bot.send_message(user_id, f"💬 Відповідь від команди support.totis:\n\n{reply_text}")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+            UPDATE feedback_messages
+            SET reply_text = ?, replied_by = ?, reply_timestamp = ?, status = ?
+            WHERE user_id = ?
+            """, (
+                reply_text,
+                "support.totis",
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "replied",
+                user_id
+            ))
+            await db.commit()
+        await bot.send_message(GROUP_CHAT_ID, f"✅ Відповідь надіслано користувачу {user_id}")
     except Exception as e:
-        await bot.send_message(GROUP_CHAT_ID, f"⚠️ Не вдалося надіслати користувачу {user_id}\n{e}")
+        await bot.send_message(GROUP_CHAT_ID, f"⚠️ Не вдалося надіслати повідомлення {user_id}\n{e}")
 
-# === 1. Розсилка кнопки "Поділитися номером" ===
-@dp.message(Command("broadcast_phones"))
-async def broadcast_phones(message: Message):
+# ==========================
+# 🔹 /STATS
+# ==========================
+@dp.message(Command("stats"))
+async def stats_handler(message: Message):
     if message.chat.id != GROUP_CHAT_ID:
         return
-    users = await get_all_user_ids()
-    kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(KeyboardButton("📞 Поділитися номером", request_contact=True))
 
-    sent_count, failed = 0, 0
-    for uid in users:
-        try:
-            await bot.send_message(uid, "📞 Будь ласка, поділіться своїм номером телефону", reply_markup=kb)
-            sent_count += 1
-        except Exception as e:
-            failed += 1
-            logging.warning(f"Failed to send to {uid}: {e}")
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM feedback_messages") as c:
+            total = (await c.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM feedback_messages WHERE date(timestamp)=date('now')") as c:
+            today = (await c.fetchone())[0]
 
-    await message.answer(f"📢 Розіслано {sent_count} користувачам, не доставлено: {failed}")
+    await message.answer(
+        f"📊 <b>Статистика повідомлень</b>\n\n"
+        f"За сьогодні: <b>{today}</b>\n"
+        f"Всього: <b>{total}</b>", parse_mode="HTML"
+    )
 
-# === 2. Розсилка кастомного тексту ===
-broadcast_text = {}
+# ==========================
+# 🔹 /EXPORT → GOOGLE SHEETS
+# ==========================
+async def run_export():
+    creds_json = os.getenv("GOOGLE_KEY_JSON")
+    creds_dict = json.loads(creds_json)
+    creds = Credentials.from_service_account_info(
+        creds_dict,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    )
 
-@dp.message(Command("broadcast_message"))
-async def prepare_broadcast_text(message: Message):
+    gc = gspread.authorize(creds)
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    sh = gc.open_by_key(sheet_id)
+    ws = sh.sheet1
+
+    ws.clear()
+    ws.append_row([
+        "id", "user_id", "user_name", "username", "phone", "message_type",
+        "message_text", "media_file_id", "group_message_id",
+        "timestamp", "reply_text", "replied_by", "reply_timestamp", "status"
+    ])
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT * FROM feedback_messages") as cursor:
+            rows = await cursor.fetchall()
+            for row in rows:
+                ws.append_row([str(x) if x is not None else "" for x in row])
+
+@dp.message(Command("export"))
+async def export_to_sheets(message: Message):
     if message.chat.id != GROUP_CHAT_ID:
         return
-    broadcast_text["awaiting"] = True
-    await message.answer("✏️ Відправ реплаєм повідомлення, яке потрібно розіслати всім користувачам.")
-
-@dp.message(F.chat.id == GROUP_CHAT_ID, F.reply_to_message)
-async def handle_broadcast_reply(message: Message):
-    if not broadcast_text.get("awaiting"):
-        return
-    broadcast_text["awaiting"] = False
-
-    users = await get_all_user_ids()
-    sent_count, failed = 0, 0
-    for uid in users:
-        try:
-            await bot.send_message(uid, message.text)
-            sent_count += 1
-        except Exception as e:
-            failed += 1
-            logging.warning(f"Failed to send broadcast to {uid}: {e}")
-
-    await message.answer(f"✅ Розіслано {sent_count} користувачам, не доставлено: {failed}")
-
-# === 3. Відправка одному користувачу ===
-target_user = {}
-
-@dp.message(Command("send_user"))
-async def send_to_specific_user(message: Message):
-    if message.chat.id != GROUP_CHAT_ID:
-        return
+    await message.answer("📤 Розпочинаю експорт у Google Sheets...")
     try:
-        user_id = int(message.text.split()[1])
-        target_user["id"] = user_id
-        await message.answer(f"🟢 Вкажи текст або надішли фото/відео для користувача {user_id}")
-    except:
-        await message.answer("⚠️ Формат: /send_user <user_id>")
-
-@dp.message(F.chat.id == GROUP_CHAT_ID, F.reply_to_message == None)
-async def handle_admin_send(message: Message):
-    if not target_user.get("id"):
-        return
-    user_id = target_user.pop("id")
-    try:
-        if message.text:
-            await bot.send_message(user_id, message.text)
-        elif message.photo:
-            await bot.send_photo(user_id, message.photo[-1].file_id, caption=message.caption)
-        elif message.video:
-            await bot.send_video(user_id, message.video.file_id, caption=message.caption)
-        await message.answer(f"✅ Повідомлення надіслано користувачу {user_id}")
+        await run_export()
+        await message.answer("✅ Експорт завершено успішно!")
     except Exception as e:
-        await message.answer(f"⚠️ Не вдалося надіслати користувачу {user_id}\n{e}")
+        await message.answer(f"⚠️ Помилка експорту:\n<code>{e}</code>", parse_mode="HTML")
 
-# === Запуск ===
+# ==========================
+# 🔹 RUN
+# ==========================
 async def main():
     await init_db()
     await dp.start_polling(bot)
