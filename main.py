@@ -128,38 +128,76 @@ async def user_document(message: Message):
 
 # ---------------- GROUP → USER (Reply handler) ----------------
 
+ID_PATTERN = re.compile(r"🆔 <code>(\d+)</code>")
+
+def extract_user_id_from_replied(replied: Message) -> int | None:
+    """
+    Дістає user_id з тексту або підпису у повідомленні бота,
+    на яке відповів адмін у групі.
+    """
+    payload = (replied.text or "") + "\n" + (replied.caption or "")
+    m = ID_PATTERN.search(payload)
+    return int(m.group(1)) if m else None
+
+
 @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), F.reply_to_message)
 async def on_admin_reply(message: Message):
     """
-    Якщо адміністратор відповідає (Reply) у групі на повідомлення бота,
-    бот надсилає цей текст користувачу, ID якого було в оригінальному повідомленні.
+    Адмін відповідає (Reply) у групі на повідомлення бота — бот шле це користувачу.
+    Працює і для тексту, і для фото/документа від адміна.
     """
     try:
-        replied = message.reply_to_message
-        if not replied or not replied.text:
-            return
-
-        match = re.search(r"🆔 <code>(\d+)</code>", replied.text)
-        if not match:
-            return
-
-        user_id = int(match.group(1))
         me = await bot.me()
-        if user_id == me.id:
+        if message.from_user.id == me.id:
+            return  # ігноруємо власні
+
+        replied = message.reply_to_message
+        if not replied:
             return
 
-        text = message.text or "(без тексту)"
-        await bot.send_message(
-            user_id,
-            f"💬 <b>Відповідь від адміністратора:</b>\n\n{text}",
-            parse_mode="HTML",
-        )
+        user_id = extract_user_id_from_replied(replied)
+        if not user_id:
+            await message.reply(
+                "⚠️ Не знайшов ID користувача. Відповідайте саме на повідомлення бота з хедером.",
+                reply=False,
+            )
+            return
+
+        # Відправляємо залежно від того, що саме написав/прикріпив адмін
+        if message.text:
+            await bot.send_message(
+                user_id,
+                f"💬 <b>Відповідь від адміністратора:</b>\n\n{message.text}",
+                parse_mode="HTML",
+            )
+        elif message.photo:
+            await bot.send_photo(
+                user_id,
+                message.photo[-1].file_id,
+                caption=message.caption or "",
+            )
+        elif message.document:
+            await bot.send_document(
+                user_id,
+                message.document.file_id,
+                caption=message.caption or "",
+            )
+        else:
+            # fallback, щоб не “мовчало”, навіть якщо тип ще не покритий
+            await bot.send_message(
+                user_id,
+                "💬 Адміністратор надіслав відповідь.",
+            )
+
         await message.reply("✅ Надіслано користувачу.", reply=False)
         log.info(f"🔁 Admin reply sent to user {user_id}")
 
     except Exception as e:
         log.warning(f"Admin reply failed: {e}")
-        await message.reply(f"❌ Помилка надсилання користувачу: {e}", reply=False)
+        try:
+            await message.reply(f"❌ Помилка надсилання користувачу: {e}", reply=False)
+        except:
+            pass
 
 
 # ---------------- STARTUP ----------------
