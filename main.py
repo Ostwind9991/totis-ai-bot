@@ -1,5 +1,6 @@
 import logging
 import re
+import os
 import asyncio
 import aiosqlite
 from datetime import datetime
@@ -10,8 +11,8 @@ from google.oauth2 import service_account
 import gspread
 
 # === БАЗОВІ НАЛАШТУВАННЯ ===
-BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-GROUP_CHAT_ID = -1003250890622   # оновлений ID супер-групи
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "-1000000000000"))  # <-- з Railway
 DB_PATH = "feedback_messages.db"
 
 bot = Bot(token=BOT_TOKEN)
